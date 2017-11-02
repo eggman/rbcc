@@ -1,14 +1,17 @@
 #!/usr/bin/ruby
 
 module Ast
-  Op    = Struct.new :op, :left, :right
-  Int   = Struct.new :ival
-  Str   = Struct.new :sval
+  INT = 0
+  STR = 1
+
+  Op    = Struct.new :type, :left, :right
+  Int   = Struct.new :type, :ival
+  Str   = Struct.new :type, :sval
 end
 
 def error(str)
   raise RuntimeError, str
-1end
+end
 
 def is_int(str)
   Integer(str) != nil rescue false
@@ -22,11 +25,22 @@ def skip_space
   end
 end
 
+def priority(op)
+  case op
+  when '+','-' then
+    return 1
+  when '*','/' then
+    return 2
+  else
+    error("Unknown binary operator: %c"%op)
+  end
+end
+
 def read_number(n)
   while c = STDIN.getc
     unless is_int(c)
       STDIN.ungetc(c)
-      return Ast::Int.new n
+      return Ast::Int.new Ast::INT, n
     end
     n = n * 10 + c.to_i
   end
@@ -51,28 +65,27 @@ def read_string
     end
     buf<<c
   end
-  return Ast::Str.new buf
+  return Ast::Str.new Ast::STR, buf
 end
 
-def read_expr2(left)
-  skip_space()
-  c = STDIN.getc
-  return left if STDIN.eof
-  if c == '+'
-    op = '+'
-  elsif c == '-'
-    op = '-'
-  else
-    error("Operator expected, but got '%c'."%c)
+def read_expr2(prec)
+  ast = read_prim()
+  while true
+    skip_space()
+    c = STDIN.getc
+    return ast if STDIN.eof
+    prec2 = priority(c)
+    if prec2 < prec
+      STDIN.ungetc(c)
+      return ast
+    end
+    skip_space()
+    ast = Ast::Op.new c, ast, read_expr2(prec2 + 1)
   end
-  skip_space()
-  right = read_prim()
-  return read_expr2(Ast::Op.new op, left, right)
 end
 
 def read_expr
-  left = read_prim()
-  return read_expr2(left)
+  return read_expr2(0)
 end
 
 def emit_string(ast)
@@ -88,30 +101,40 @@ def emit_string(ast)
          "ret\n")
 end
 
-def ensureintexpr(ast)
-  case ast.class
+def ensure_intexpr(ast)
+  case ast.type
   when !Ast::Op && !Ast::Int
     error("integer or binary operator expected")
   end
 end
 
 def emit_binop(ast)
-  if    ast.class == Ast::Op && ast.op == "+"
-    op = "add"
-  elsif ast.class == Ast::Op && ast.op == "-"
-    op = "sub"
-  else
+  if ast.type == Ast::STR || ast.type == Ast::INT
     error("invalid operand");
+  elsif ast.type == "+"
+    op = "add"
+  elsif ast.type == "-"
+    op = "sub"
+  elsif ast.type == "*"
+    op = "imul"
   end
   emit_intexpr(ast.left)
-  printf("mov %%eax, %%ebx\n\t")
+  printf("push %%rax\n\t")
   emit_intexpr(ast.right)
-  printf("%s %%ebx, %%eax\n\t", op)
+  if ast.type == '/'
+    printf("mov %%eax, %%ebx\n\t")
+    printf("pop %%rax\n\t")
+    printf("mov $0, %%edx\n\t")
+    printf("idiv %%ebx\n\t")
+  else
+    printf("pop %%rbx\n\t")
+    printf("%s %%ebx, %%eax\n\t", op)
+  end
 end
 
 def emit_intexpr(ast)
-  ensureintexpr(ast)
-  if ast.class == Ast::Int
+  ensure_intexpr(ast)
+  if ast.type == Ast::INT
     printf("mov $%d, %%eax\n\t", ast.ival)
   else
     emit_binop(ast)
@@ -119,7 +142,7 @@ def emit_intexpr(ast)
 end
 
 def compile(ast)
-  if ast.class == Ast::Str
+  if ast.type == Ast::STR
     emit_string(ast)
   else
     printf(".text\n\t"+
@@ -131,17 +154,17 @@ def compile(ast)
 end
 
 def print_ast(ast)
-  if ast.class == Ast::Op
-    print("(+ ") if ast.op == "+"
-    print("(- ") if ast.op == "-"
+  case ast.type
+  when Ast::INT
+    print ast.ival.to_s
+  when Ast::STR
+    print ast.sval.to_s
+  else
+    printf("(%c ", ast.type)
     print_ast(ast.left)
     print(" ")
     print_ast(ast.right)
     print(")")
-  elsif ast.class == Ast::Int
-    print ast.ival.to_s
-  elsif ast.class == Ast::Str
-    print ast.sval.to_s
   end
 end
 
