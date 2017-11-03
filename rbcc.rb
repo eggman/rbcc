@@ -44,12 +44,31 @@ end
 module Ast
   INT = 0
   SYM = 1
-  FUNCALL = 2
+  STR = 2
+  FUNCALL = 3
+
+  @@strings_sid = 0
+  @@strings_list = Array.new
 
   Op      = Struct.new :type, :left, :right
   Int     = Struct.new :type, :ival
   Sym     = Struct.new :type, :var
+  Str     = Struct.new :type, :sval, :sid
   Funcall = Struct.new :type, :fname, :args
+
+  def make_str(str)
+    ast = Str.new Ast::STR, str, @@strings_sid
+    @@strings_list << ast
+    @@strings_sid += 1
+    ast
+  end
+  module_function :make_str
+
+  def strings
+    @@strings_list
+  end
+  module_function :strings
+
 end
 
 def error(str)
@@ -95,7 +114,7 @@ def read_ident(c)
       STDIN.ungetc(c)
       break
     end
-    buf<<c
+    buf << c
   end
   return buf
 end
@@ -138,8 +157,24 @@ def read_prim
   return nil                 if STDIN.eof
   c = STDIN.getc
   return read_number(c.to_i) if c.numeric?
+  return read_string()         if c == '"'
   return read_ident_or_func(c) if c.alpha?
   error("Don't know how to handle '%c'."%c)
+end
+
+def read_string
+  buf = ""
+  while true
+    error("Unterminated string") if STDIN.eof
+    c = STDIN.getc
+    break if c == '"'
+    if c == '\\'
+      error("Unterminated string") if STDIN.eof
+      c = STDIN.getc
+    end
+    buf << c
+  end
+  return Ast::make_str(buf)
 end
 
 def read_expr2(prec)
@@ -220,7 +255,9 @@ def emit_expr(ast)
     printf("mov $%d, %%eax\n\t", ast.ival)
   when Ast::SYM
     printf("mov -%d(%%rbp), %%eax\n\t", ast.var.pos * 4)
-  when Ast::FUNCALL then
+  when Ast::STR
+    printf("lea .s%d(%%rip), %%rax\n\t", ast.sid);
+  when Ast::FUNCALL
     for i in 1..(ast.args.length-1) do
       printf("push %%%s\n\t", REGS[i])
     end
@@ -246,7 +283,11 @@ def print_ast(ast)
   when Ast::INT
     print ast.ival.to_s
   when Ast::SYM
-    print ast.var.name.to_s
+    print ast.var.name
+  when Ast::STR then
+    printf("\"")
+    print(ast.sval)
+    printf("\"")
   when Ast::FUNCALL then
     printf("%s(", ast.fname);
     for arg in ast.args do
@@ -263,16 +304,33 @@ def print_ast(ast)
   end
 end
 
+def emit_data_section
+  return if Ast::strings.empty?
+  printf("\t.data\n")
+  for str in Ast::strings do
+    printf(".s%d:\n\t", str.sid);
+    printf(".string \"");
+    print(str.sval);
+    printf("\"\n");
+  end
+  printf("\t")
+end
+
 if __FILE__ == $0
   wantast = ARGV[0] == "-a"
+  exprs = Array.new
+  while true
+    ast = read_expr()
+    break unless ast
+    exprs << ast
+  end
   if !wantast
+    emit_data_section()
     printf(".text\n\t" +
            ".global mymain\n" +
            "mymain:\n\t")
   end
-  while true
-    ast = read_expr()
-    break unless ast
+  for ast in exprs do
     if wantast
       print_ast(ast)
     else
