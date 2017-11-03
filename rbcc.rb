@@ -17,9 +17,10 @@ end
 
 module Ast
   INT = 0
-  VAR = 1
-  STR = 2
-  FUNCALL = 3
+  CHAR = 1
+  VAR = 2
+  STR = 3
+  FUNCALL = 4
 
   @@vars_pos  = 0
   @@vars_list = Array.new
@@ -28,6 +29,7 @@ module Ast
 
   Op      = Struct.new :type, :left, :right
   Int     = Struct.new :type, :ival
+  Char    = Struct.new :type, :c
   Var     = Struct.new :type, :name, :pos
   Str     = Struct.new :type, :sval, :sid
   Funcall = Struct.new :type, :fname, :args
@@ -147,11 +149,25 @@ def read_ident_or_func(c)
   return Ast::make_var(name)
 end
 
+def read_char
+  error("Unterminated string") if STDIN.eof
+  c = STDIN.getc
+  if c == '\\'
+    error("Unterminated string") if STDIN.eof
+    c = STDIN.getc
+  end
+  error("Unterminated string") if STDIN.eof
+  c2 = STDIN.getc
+  error("Malformed char constant") unless c2 == '\''
+  return Ast::Char.new Ast::CHAR, c.ord
+end
+
 def read_prim
   return nil                 if STDIN.eof
   c = STDIN.getc
   return read_number(c.to_i) if c.numeric?
   return read_string()         if c == '"'
+  return read_char()           if c == '\''
   return read_ident_or_func(c) if c.alpha?
   error("Don't know how to handle '%c'."%c)
 end
@@ -249,6 +265,8 @@ def emit_expr(ast)
     printf("mov $%d, %%eax\n\t", ast.ival)
   when Ast::VAR
     printf("mov -%d(%%rbp), %%eax\n\t", ast.pos * 4)
+  when Ast::CHAR then
+    printf("mov $%d, %%eax\n\t", ast.c);
   when Ast::STR
     printf("lea .s%d(%%rip), %%rax\n\t", ast.sid);
   when Ast::FUNCALL
@@ -278,11 +296,13 @@ def print_ast(ast)
     print ast.ival.to_s
   when Ast::VAR
     print ast.name
-  when Ast::STR then
+  when Ast::CHAR
+    printf("'%c'", ast.c);
+  when Ast::STR
     printf("\"")
     print(ast.sval)
     printf("\"")
-  when Ast::FUNCALL then
+  when Ast::FUNCALL
     printf("%s(", ast.fname);
     for arg in ast.args do
       print_ast(arg)

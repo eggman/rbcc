@@ -57,6 +57,7 @@ testast '(/ (/ 24 2) 4)' '24/2/4;'
 testast '(= a 3)' 'a=3;'
 
 testast '"abc"' '"abc";'
+testast "'c'" "'c';"
 
 testast 'a()' 'a();'
 testast 'a(b,c,d,e,f,g)' 'a(b,c,d,e,f,g);'
@@ -71,6 +72,8 @@ test 14 '1*2+3*4;'
 test 4 '4/2+6/3;'
 test 3 '24/2/4;'
 
+test 98 "'a'+1;"
+
 test 2 '1;2;'
 test 3 'a=1;a+2;'
 test 102 'a=1;b=48+2;c=a+b;c*2;'
@@ -82,5 +85,6 @@ test 25 'sum2(20, 5);'
 test 15 'sum5(1, 2, 3, 4, 5);'
 test a3 'printf("a");3;'
 test abc5 'printf("%s", "abc");5;'
+test b1 "printf(\"%c\", 'a'+1);1;"
 
 echo "All tests passed"
