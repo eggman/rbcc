@@ -15,44 +15,20 @@ class String
   end
 end
 
-module Var
-  @@vars_pos  = 0
-  @@vars_list = Array.new
-  Var = Struct.new :name, :pos
-
-  def find_var(name)
-    @@vars_list.each {|var|
-      return var if (var.name == name)
-    }
-    return nil
-  end
-  module_function :find_var
-
-  def make (name)
-    unless find_var(name)
-      var = Var.new name, @@vars_pos
-      @@vars_pos += 1
-      @@vars_list<<var
-    else
-      var = find_var(name)
-    end
-    return var
-  end
-  module_function :make
-end
-
 module Ast
   INT = 0
-  SYM = 1
+  VAR = 1
   STR = 2
   FUNCALL = 3
 
+  @@vars_pos  = 0
+  @@vars_list = Array.new
   @@strings_sid = 0
   @@strings_list = Array.new
 
   Op      = Struct.new :type, :left, :right
   Int     = Struct.new :type, :ival
-  Sym     = Struct.new :type, :var
+  Var     = Struct.new :type, :name, :pos
   Str     = Struct.new :type, :sval, :sid
   Funcall = Struct.new :type, :fname, :args
 
@@ -69,6 +45,25 @@ module Ast
   end
   module_function :strings
 
+  def find_var(name)
+    @@vars_list.each {|var|
+      return var if (var.name == name)
+    }
+    return nil
+  end
+  module_function :find_var
+
+  def make_var (name)
+    unless find_var(name)
+      var = Ast::Var.new Ast::VAR, name, @@vars_pos
+      @@vars_pos += 1
+      @@vars_list << var
+    else
+      var = find_var(name)
+    end
+    return var
+  end
+  module_function :make_var
 end
 
 def error(str)
@@ -149,8 +144,7 @@ def read_ident_or_func(c)
     return read_func_args(name)
   end
   STDIN.ungetc(c2)
-  var = Var::make(name)
-  return Ast::Sym.new Ast::SYM, var
+  return Ast::make_var(name)
 end
 
 def read_prim
@@ -220,13 +214,13 @@ end
 def emit_binop(ast)
   if ast.type == '='
     emit_expr(ast.right)
-    unless ast.left.type == Ast::SYM
+    unless ast.left.type == Ast::VAR
       error("Symbol expected")
     end
-    printf("mov %%eax, -%d(%%rbp)\n\t", ast.left.var.pos * 4)
+    printf("mov %%eax, -%d(%%rbp)\n\t", ast.left.pos * 4)
     return
   end
-  if ast.type == Ast::SYM || ast.type == Ast::INT
+  if ast.type == Ast::VAR || ast.type == Ast::INT
     error("invalid operand");
   elsif ast.type == "+"
     op = "add"
@@ -253,8 +247,8 @@ def emit_expr(ast)
   case ast.type
   when Ast::INT
     printf("mov $%d, %%eax\n\t", ast.ival)
-  when Ast::SYM
-    printf("mov -%d(%%rbp), %%eax\n\t", ast.var.pos * 4)
+  when Ast::VAR
+    printf("mov -%d(%%rbp), %%eax\n\t", ast.pos * 4)
   when Ast::STR
     printf("lea .s%d(%%rip), %%rax\n\t", ast.sid);
   when Ast::FUNCALL
@@ -282,8 +276,8 @@ def print_ast(ast)
   case ast.type
   when Ast::INT
     print ast.ival.to_s
-  when Ast::SYM
-    print ast.var.name
+  when Ast::VAR
+    print ast.name
   when Ast::STR then
     printf("\"")
     print(ast.sval)
