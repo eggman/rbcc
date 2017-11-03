@@ -1,11 +1,17 @@
 #!/usr/bin/ruby
 
+MAX_ARGS=6
+REGS=["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+
 class String
   def numeric?
     Integer(self) != nil rescue false
   end
-  def alpha?
+  def alnum?
     !!match(/^[[:alnum:]]+$/)
+  end
+  def alpha?
+    !!match(/^[[:alpha:]]+$/)
   end
 end
 
@@ -38,10 +44,12 @@ end
 module Ast
   INT = 0
   SYM = 1
+  FUNCALL = 2
 
-  Op    = Struct.new :type, :left, :right
-  Int   = Struct.new :type, :ival
-  Sym   = Struct.new :type, :var
+  Op      = Struct.new :type, :left, :right
+  Int     = Struct.new :type, :ival
+  Sym     = Struct.new :type, :var
+  Funcall = Struct.new :type, :fname, :args
 end
 
 def error(str)
@@ -79,17 +87,50 @@ def read_number(n)
   end
 end
 
-def read_symbol(c)
+def read_ident(c)
   buf = c
   while true
     c = STDIN.getc
-    unless c.alpha?
+    unless c.alnum?
       STDIN.ungetc(c)
       break
     end
     buf<<c
   end
-  var = Var::make(buf)
+  return buf
+end
+
+def read_func_args(fname)
+  args = Array.new
+  for i in 1..MAX_ARGS do
+    skip_space()
+    c = STDIN.getc
+    break if c == ')'
+    STDIN.ungetc(c)
+    args<<read_expr2(0)
+    c = STDIN.getc
+    break if c == ')'
+    if c == ','
+      skip_space()
+    else
+      error("Unexpected character: '%c'"%c)
+    end
+  end
+  if args.length > MAX_ARGS
+    error("Too many arguments: %s", fname);
+  end
+  return Ast::Funcall.new Ast::FUNCALL, fname, args
+end
+
+def read_ident_or_func(c)
+  name = read_ident(c)
+  skip_space()
+  c2 = STDIN.getc
+  if c2 == '('
+    return read_func_args(name)
+  end
+  STDIN.ungetc(c2)
+  var = Var::make(name)
   return Ast::Sym.new Ast::SYM, var
 end
 
@@ -97,7 +138,7 @@ def read_prim
   return nil                 if STDIN.eof
   c = STDIN.getc
   return read_number(c.to_i) if c.numeric?
-  return read_symbol(c)      if c.alpha?
+  return read_ident_or_func(c) if c.alpha?
   error("Don't know how to handle '%c'."%c)
 end
 
@@ -179,7 +220,23 @@ def emit_expr(ast)
     printf("mov $%d, %%eax\n\t", ast.ival)
   when Ast::SYM
     printf("mov -%d(%%rbp), %%eax\n\t", ast.var.pos * 4)
-  else
+  when Ast::FUNCALL then
+    for i in 1..(ast.args.length-1) do
+      printf("push %%%s\n\t", REGS[i])
+    end
+    for arg in ast.args do
+      emit_expr(arg)
+      printf("push %%rax\n\t");
+    end
+    for arg in ast.args.reverse do
+      printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
+    end
+    printf("mov $0, %%eax\n\t");
+    printf("call %s\n\t", ast.fname);
+    for arg in ast.args[0..-2].reverse do
+      printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
+    end
+ else
     emit_binop(ast)
   end
 end
@@ -190,6 +247,13 @@ def print_ast(ast)
     print ast.ival.to_s
   when Ast::SYM
     print ast.var.name.to_s
+  when Ast::FUNCALL then
+    printf("%s(", ast.fname);
+    for arg in ast.args do
+      print_ast(arg)
+      printf(",") unless arg == ast.args[-1]
+    end
+    print(")")
   else
     printf("(%c ", ast.type)
     print_ast(ast.left)
