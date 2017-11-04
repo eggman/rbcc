@@ -32,12 +32,11 @@ module Token
   module_function :make_ident, :make_strtok, :make_punct, :make_int, :make_char
 end
 
-def skip_space
+def getc_nonspace
   while !STDIN.eof
     c = STDIN.getc
-    next if c.strip == ""
-    STDIN.ungetc(c)
-    return;
+    next if c.strip == "" || c == '\n' || c == '\r'
+    return c;
   end
 end
 
@@ -94,9 +93,7 @@ def read_ident(c)
 end
 
 def read_token_init
-  skip_space()
-  return nil if STDIN.eof
-  c = STDIN.getc
+  c = getc_nonspace()
   case c
   when '0','1','2','3','4','5','6','7','8','9'
     return read_number(c.to_i)
@@ -111,6 +108,8 @@ def read_token_init
     return read_ident(c)
   when '/','=','*','+','-','(',')',',',';'
     return Token::make_punct(c)
+  when nil
+    return nil
   else
     error("Unexpected character: '%c'"%c);
   end
@@ -136,6 +135,12 @@ end
 def unget_token(tok)
   error("Push back buffer is already full") if $ungotten
   $ungotten = tok
+end
+
+def peek_token
+  tok = read_token()
+  unget_token(tok)
+  return tok
 end
 
 def read_token

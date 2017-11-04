@@ -6,12 +6,20 @@ load 'lex.rb'
 MAX_ARGS=6
 REGS=["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
 
+module CTYPE
+  VOID=0
+  INT=1
+  CHAR=2
+  STR=4
+end
+
 module Ast
   INT = 0
   CHAR = 1
   VAR = 2
   STR = 3
   FUNCALL = 4
+  DECL = 5
 
   @@vars_pos  = 0
   @@vars_list = Array.new
@@ -21,9 +29,10 @@ module Ast
   Op      = Struct.new :type, :left, :right
   Int     = Struct.new :type, :ival
   Char    = Struct.new :type, :c
-  Var     = Struct.new :type, :name, :pos
+  Var     = Struct.new :type, :vname, :vpos, :ctype
   Str     = Struct.new :type, :sval, :sid
   Funcall = Struct.new :type, :fname, :args
+  Decl    = Struct.new :type, :decl_var, :decl_init
 
   def make_str(str)
     ast = Str.new Ast::STR, str, @@strings_sid
@@ -40,23 +49,28 @@ module Ast
 
   def find_var(name)
     @@vars_list.each {|var|
-      return var if (var.name == name)
+      return var if (var.vname == name)
     }
     return nil
   end
   module_function :find_var
 
-  def make_var (name)
-    unless find_var(name)
-      var = Ast::Var.new Ast::VAR, name, @@vars_pos
+  def make_var (ctype, vname)
+    unless find_var(vname)
+      var = Var.new Ast::VAR, vname, @@vars_pos, ctype
       @@vars_pos += 1
       @@vars_list << var
     else
-      var = find_var(name)
+      var = find_var(vname)
     end
     return var
   end
   module_function :make_var
+
+  def vars
+    @@vars_list
+  end
+  module_function :vars
 end
 
 def error(str)
@@ -82,7 +96,7 @@ def read_func_args(fname)
     tok = read_token()
     break if is_punct(tok, ')')
     unget_token(tok)
-    args<<read_expr2(0)
+    args<<read_expr(0)
     tok = read_token()
     break if is_punct(tok, ')')
     error("Unexpected character: '%s'"%token_to_string(tok)) unless is_punct(tok, ',')
@@ -99,7 +113,11 @@ def read_ident_or_func(name)
    return read_func_args(name)
   end
   unget_token(tok)
-  return Ast::make_var(name)
+  v = Ast::find_var(name)
+  if(!v)
+    error("Undefined varaible: %s"%name)
+  end
+  return v
 end
 
 def read_prim
@@ -116,7 +134,7 @@ def read_prim
   end
 end
 
-def read_expr2(prec)
+def read_expr(prec)
   ast = read_prim()
   return nil unless ast
   while true
@@ -130,16 +148,8 @@ def read_expr2(prec)
       unget_token(tok)
       return ast
     end
-    ast = Ast::Op.new tok.punct, ast, read_expr2(prec2 + 1)
+    ast = Ast::Op.new tok.punct, ast, read_expr(prec2 + 1)
   end
-end
-
-def read_expr
-  r = read_expr2(0)
-  return nil unless r
-  tok = read_token()
-  error("Unterminated expression: %s"%token_to_string(tok)) unless is_punct(tok, ';')
-  return r
 end
 
 def emit_string(ast)
@@ -155,13 +165,60 @@ def emit_string(ast)
          "ret\n")
 end
 
+def get_ctype(tok)
+  if (tok.type != Token::IDENT)
+    return -1
+  end
+  if (tok.sval == "int")
+    return CTYPE::INT
+  end
+  if (tok.sval == "char")
+    return CTYPE::CHAR
+  end
+  if (tok.sval == "string")
+    return CTYPE::STR
+  end
+  return -1
+end
+
+def is_type_keyword(tok)
+  return get_ctype(tok) != -1
+end
+
+def expect(punct)
+  tok = read_token()
+  if (!is_punct(tok, punct))
+    error("'%c' expected, but got %s"%[punct, token_to_string(tok)])
+  end
+end
+
+def read_decl
+  ctype = get_ctype(read_token())
+  name = read_token()
+  error("Identifier expected, but got %s"%token_to_string(name)) if name.type != Token::IDENT
+  var = Ast::make_var(ctype, name.sval)
+  expect('=')
+  init = read_expr(0)
+  return Ast::Decl.new Ast::DECL, var, init
+end
+
+def read_decl_or_stmt
+  tok = peek_token()
+  return nil unless tok
+  r = is_type_keyword(tok) ? read_decl() : read_expr(0);
+  tok = read_token()
+  error("Unterminated expression: %s"%token_to_string(tok)) unless is_punct(tok, ';')
+  return r
+end
+
+def emit_assign(var, value)
+  emit_expr(value)
+  printf("mov %%eax, -%d(%%rbp)\n\t", var.vpos * 4)
+end
+
 def emit_binop(ast)
   if ast.type == '='
-    emit_expr(ast.right)
-    unless ast.left.type == Ast::VAR
-      error("Symbol expected")
-    end
-    printf("mov %%eax, -%d(%%rbp)\n\t", ast.left.pos * 4)
+    emit_assign(ast.left, ast.right)
     return
   end
   if ast.type == Ast::VAR || ast.type == Ast::INT
@@ -192,7 +249,7 @@ def emit_expr(ast)
   when Ast::INT
     printf("mov $%d, %%eax\n\t", ast.ival)
   when Ast::VAR
-    printf("mov -%d(%%rbp), %%eax\n\t", ast.pos * 4)
+    printf("mov -%d(%%rbp), %%eax\n\t", ast.vpos * 4)
   when Ast::CHAR then
     printf("mov $%d, %%eax\n\t", ast.c);
   when Ast::STR
@@ -213,8 +270,20 @@ def emit_expr(ast)
     for arg in ast.args[0..-2].reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
     end
- else
+  when Ast::DECL
+    emit_assign(ast.decl_var, ast.decl_init)
+  else
     emit_binop(ast)
+  end
+end
+
+def ctype_to_string(ctype)
+  case (ctype)
+  when CTYPE::VOID; return "void"
+  when CTYPE::INT ; return "int"
+  when CTYPE::CHAR; return "char"
+  when CTYPE::STR ; return "string"
+  else error("Unknown ctype: %d", ctype)
   end
 end
 
@@ -223,7 +292,7 @@ def print_ast(ast)
   when Ast::INT
     print ast.ival.to_s
   when Ast::VAR
-    print ast.name
+    print ast.vname
   when Ast::CHAR
     printf("'%c'", ast.c);
   when Ast::STR
@@ -237,6 +306,12 @@ def print_ast(ast)
       printf(",") unless arg == ast.args[-1]
     end
     print(")")
+  when Ast::DECL then
+    printf("(decl %s %s ",
+           ctype_to_string(ast.decl_var.ctype),
+           ast.decl_var.vname)
+    print_ast(ast.decl_init)
+    printf(")");
   else
     printf("(%c ", ast.type)
     print_ast(ast.left)
@@ -262,7 +337,7 @@ if __FILE__ == $0
   wantast = ARGV[0] == "-a"
   exprs = Array.new
   while true
-    ast = read_expr()
+    ast = read_decl_or_stmt()
     break unless ast
     exprs << ast
   end
