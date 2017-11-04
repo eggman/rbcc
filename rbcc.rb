@@ -1,19 +1,10 @@
 #!/usr/bin/ruby
 
+load 'string.rb'
+load 'lex.rb'
+
 MAX_ARGS=6
 REGS=["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-
-class String
-  def numeric?
-    Integer(self) != nil rescue false
-  end
-  def alnum?
-    !!match(/^[[:alnum:]]+$/)
-  end
-  def alpha?
-    !!match(/^[[:alpha:]]+$/)
-  end
-end
 
 module Ast
   INT = 0
@@ -72,14 +63,6 @@ def error(str)
   raise RuntimeError, str
 end
 
-def skip_space
-  while c = STDIN.getc
-    next if c.strip == ""
-    STDIN.ungetc(c)
-    return
-  end
-end
-
 def priority(op)
   case op
   when '='
@@ -93,44 +76,16 @@ def priority(op)
   end
 end
 
-def read_number(n)
-  while c = STDIN.getc
-    unless c.numeric?
-      STDIN.ungetc(c)
-      return Ast::Int.new Ast::INT, n
-    end
-    n = n * 10 + c.to_i
-  end
-end
-
-def read_ident(c)
-  buf = c
-  while true
-    c = STDIN.getc
-    unless c.alnum?
-      STDIN.ungetc(c)
-      break
-    end
-    buf << c
-  end
-  return buf
-end
-
 def read_func_args(fname)
   args = Array.new
   for i in 1..MAX_ARGS do
-    skip_space()
-    c = STDIN.getc
-    break if c == ')'
-    STDIN.ungetc(c)
+    tok = read_token()
+    break if is_punct(tok, ')')
+    unget_token(tok)
     args<<read_expr2(0)
-    c = STDIN.getc
-    break if c == ')'
-    if c == ','
-      skip_space()
-    else
-      error("Unexpected character: '%c'"%c)
-    end
+    tok = read_token()
+    break if is_punct(tok, ')')
+    error("Unexpected character: '%s'"%token_to_string(tok)) unless is_punct(tok, ',')
   end
   if args.length > MAX_ARGS
     error("Too many arguments: %s", fname);
@@ -138,79 +93,52 @@ def read_func_args(fname)
   return Ast::Funcall.new Ast::FUNCALL, fname, args
 end
 
-def read_ident_or_func(c)
-  name = read_ident(c)
-  skip_space()
-  c2 = STDIN.getc
-  if c2 == '('
-    return read_func_args(name)
+def read_ident_or_func(name)
+  tok = read_token()
+  if is_punct(tok, '(')
+   return read_func_args(name)
   end
-  STDIN.ungetc(c2)
+  unget_token(tok)
   return Ast::make_var(name)
 end
 
-def read_char
-  error("Unterminated string") if STDIN.eof
-  c = STDIN.getc
-  if c == '\\'
-    error("Unterminated string") if STDIN.eof
-    c = STDIN.getc
-  end
-  error("Unterminated string") if STDIN.eof
-  c2 = STDIN.getc
-  error("Malformed char constant") unless c2 == '\''
-  return Ast::Char.new Ast::CHAR, c.ord
-end
-
 def read_prim
-  return nil                 if STDIN.eof
-  c = STDIN.getc
-  return read_number(c.to_i) if c.numeric?
-  return read_string()         if c == '"'
-  return read_char()           if c == '\''
-  return read_ident_or_func(c) if c.alpha?
-  error("Don't know how to handle '%c'."%c)
-end
-
-def read_string
-  buf = ""
-  while true
-    error("Unterminated string") if STDIN.eof
-    c = STDIN.getc
-    break if c == '"'
-    if c == '\\'
-      error("Unterminated string") if STDIN.eof
-      c = STDIN.getc
-    end
-    buf << c
+  tok = read_token()
+  return nil unless tok
+  case tok.type
+  when Token::IDENT ; return read_ident_or_func(tok.sval)
+  when Token::INT   ; return Ast::Int.new Ast::INT, tok.ival
+  when Token::CHAR  ; return Ast::Char.new Ast::CHAR, tok.c
+  when Token::STRING; return Ast::make_str(tok.sval)
+  when Token::PUNCT ; error("unexpected character: '%c'"%tok.punct);
+  else
+    error("internal error: unknown token type: %d"%tok.type)
   end
-  return Ast::make_str(buf)
 end
 
 def read_expr2(prec)
-  skip_space()
   ast = read_prim()
   return nil unless ast
   while true
-    skip_space()
-    c = STDIN.getc
-    return ast if STDIN.eof
-    prec2 = priority(c)
-    if prec2 < prec
-      STDIN.ungetc(c)
+    tok = read_token()
+    unless tok.type == Token::PUNCT
+      unget_token(tok)
       return ast
     end
-    skip_space()
-    ast = Ast::Op.new c, ast, read_expr2(prec2 + 1)
+    prec2 = priority(tok.punct)
+    if prec2 < prec
+      unget_token(tok)
+      return ast
+    end
+    ast = Ast::Op.new tok.punct, ast, read_expr2(prec2 + 1)
   end
 end
 
 def read_expr
   r = read_expr2(0)
   return nil unless r
-  skip_space()
-  c = STDIN.getc
-  error("Unterminated expression") unless c == ';'
+  tok = read_token()
+  error("Unterminated expression: %s"%token_to_string(tok)) unless is_punct(tok, ';')
   return r
 end
 
