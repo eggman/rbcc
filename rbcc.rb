@@ -26,21 +26,42 @@ module Ast
   @@strings_sid = 0
   @@strings_list = Array.new
 
-  Op      = Struct.new :type, :left, :right
-  Int     = Struct.new :type, :ival
-  Char    = Struct.new :type, :c
-  Var     = Struct.new :type, :vname, :vpos, :ctype
-  Str     = Struct.new :type, :sval, :sid
+  Op      = Struct.new :type, :ctype, :left, :right
+  Int     = Struct.new :type, :ctype, :ival
+  Char    = Struct.new :type, :ctype, :c
+  Var     = Struct.new :type, :ctype, :vname, :vpos
+  Str     = Struct.new :type, :ctype, :sval, :sid
   Funcall = Struct.new :type, :fname, :args
   Decl    = Struct.new :type, :decl_var, :decl_init
 
+  def make_op(type, ctype, left, right)
+    Op.new type, ctype, left, right
+  end
+
+  def make_int(val)
+    Int.new INT, CTYPE::INT, val
+  end
+
+  def make_char(c)
+    Char.new CHAR, CTYPE::CHAR,  c
+  end
+
   def make_str(str)
-    ast = Str.new Ast::STR, str, @@strings_sid
+    ast = Str.new STR, CTYPE::STR, str, @@strings_sid
     @@strings_list << ast
     @@strings_sid += 1
     ast
   end
-  module_function :make_str
+
+  def make_funcall(fname, args)
+    Funcall.new FUNCALL, fname, args
+  end
+
+  def make_decl(var, init)
+    Decl.new DECL, var, init
+  end
+
+  module_function :make_op, :make_int, :make_char, :make_str, :make_funcall, :make_decl
 
   def strings
     @@strings_list
@@ -57,7 +78,7 @@ module Ast
 
   def make_var (ctype, vname)
     unless find_var(vname)
-      var = Var.new Ast::VAR, vname, @@vars_pos, ctype
+      var = Var.new VAR, ctype, vname, @@vars_pos
       @@vars_pos += 1
       @@vars_list << var
     else
@@ -75,6 +96,10 @@ end
 
 def error(str)
   raise RuntimeError, str
+end
+
+def is_right_assoc(op)
+  return op == '='
 end
 
 def priority(op)
@@ -102,9 +127,9 @@ def read_func_args(fname)
     error("Unexpected character: '%s'"%token_to_string(tok)) unless is_punct(tok, ',')
   end
   if args.length > MAX_ARGS
-    error("Too many arguments: %s", fname);
+    error("Too many arguments: %s", fname)
   end
-  return Ast::Funcall.new Ast::FUNCALL, fname, args
+  return Ast::make_funcall(fname, args)
 end
 
 def read_ident_or_func(name)
@@ -125,13 +150,53 @@ def read_prim
   return nil unless tok
   case tok.type
   when Token::IDENT ; return read_ident_or_func(tok.sval)
-  when Token::INT   ; return Ast::Int.new Ast::INT, tok.ival
-  when Token::CHAR  ; return Ast::Char.new Ast::CHAR, tok.c
+  when Token::INT   ; return Ast::make_int(tok.ival)
+  when Token::CHAR  ; return Ast::make_char(tok.c)
   when Token::STRING; return Ast::make_str(tok.sval)
   when Token::PUNCT ; error("unexpected character: '%c'"%tok.punct);
   else
     error("internal error: unknown token type: %d"%tok.type)
   end
+end
+
+def result_type(op, a, b)
+  swapped = false
+  if a.ctype > b.ctype
+    swapped = true
+    a,b=b,a
+  end
+  catch :err do
+    case a.ctype
+    when CTYPE::VOID;
+      throw :err
+    when CTYPE::INT;
+      case b.ctype
+      when CTYPE::INT;
+        return CTYPE::INT
+      when CTYPE::CHAR;
+        return CTYPE::INT
+      when CTYPE::STR;
+        throw :err
+      end
+      error("internal error1")
+    when CTYPE::CHAR;
+      case b.ctype
+      when CTYPE::CHAR;
+        return CTYPE::INT
+      when CTYPE::STR;
+        catch :err
+      end
+      error("internal error2")
+    when CTYPE::STR;
+      throw :err
+    else
+      error("internal error3")
+    end
+  end
+#err:
+  a,b = b,a if (swapped)
+  error("incompatible operands: %s and %s for %c"%
+        [ast_to_string(a), ast_to_string(b), op])
 end
 
 def read_expr(prec)
@@ -148,7 +213,9 @@ def read_expr(prec)
       unget_token(tok)
       return ast
     end
-    ast = Ast::Op.new tok.punct, ast, read_expr(prec2 + 1)
+    rest  = read_expr(prec2 + (is_right_assoc(tok.punct) ? 0 : 1))
+    ctype = result_type(tok.punct, ast, rest)
+    ast   = Ast::make_op(tok.punct, ctype, ast, rest)
   end
 end
 
@@ -199,13 +266,13 @@ def read_decl
   var = Ast::make_var(ctype, name.sval)
   expect('=')
   init = read_expr(0)
-  return Ast::Decl.new Ast::DECL, var, init
+  return Ast::make_decl(var, init)
 end
 
 def read_decl_or_stmt
   tok = peek_token()
   return nil unless tok
-  r = is_type_keyword(tok) ? read_decl() : read_expr(0);
+  r = is_type_keyword(tok) ? read_decl() : read_expr(0)
   tok = read_token()
   error("Unterminated expression: %s"%token_to_string(tok)) unless is_punct(tok, ';')
   return r
@@ -222,7 +289,7 @@ def emit_binop(ast)
     return
   end
   if ast.type == Ast::VAR || ast.type == Ast::INT
-    error("invalid operand");
+    error("invalid operand")
   elsif ast.type == "+"
     op = "add"
   elsif ast.type == "-"
@@ -251,22 +318,22 @@ def emit_expr(ast)
   when Ast::VAR
     printf("mov -%d(%%rbp), %%eax\n\t", ast.vpos * 4)
   when Ast::CHAR then
-    printf("mov $%d, %%eax\n\t", ast.c);
+    printf("mov $%d, %%eax\n\t", ast.c)
   when Ast::STR
-    printf("lea .s%d(%%rip), %%rax\n\t", ast.sid);
+    printf("lea .s%d(%%rip), %%rax\n\t", ast.sid)
   when Ast::FUNCALL
     for i in 1..(ast.args.length-1) do
       printf("push %%%s\n\t", REGS[i])
     end
     for arg in ast.args do
       emit_expr(arg)
-      printf("push %%rax\n\t");
+      printf("push %%rax\n\t")
     end
     for arg in ast.args.reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
     end
-    printf("mov $0, %%eax\n\t");
-    printf("call %s\n\t", ast.fname);
+    printf("mov $0, %%eax\n\t")
+    printf("call %s\n\t", ast.fname)
     for arg in ast.args[0..-2].reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
     end
@@ -287,48 +354,48 @@ def ctype_to_string(ctype)
   end
 end
 
-def print_ast(ast)
+def ast_to_string_int(ast, buf)
   case ast.type
   when Ast::INT
-    print ast.ival.to_s
+    buf << ast.ival.to_s
   when Ast::VAR
-    print ast.vname
+    buf << ast.vname
   when Ast::CHAR
-    printf("'%c'", ast.c);
+    buf << "'%c'" % ast.c
   when Ast::STR
-    printf("\"")
-    print(ast.sval)
-    printf("\"")
+    buf << "\"" + ast.sval + "\""
   when Ast::FUNCALL
-    printf("%s(", ast.fname);
+    buf << "%s(" % ast.fname
     for arg in ast.args do
-      print_ast(arg)
-      printf(",") unless arg == ast.args[-1]
+      ast_to_string_int(arg, buf)
+      buf << "," unless arg == ast.args[-1]
     end
-    print(")")
-  when Ast::DECL then
-    printf("(decl %s %s ",
-           ctype_to_string(ast.decl_var.ctype),
-           ast.decl_var.vname)
-    print_ast(ast.decl_init)
-    printf(")");
+    buf << ")"
+  when Ast::DECL
+    buf << "(decl %s %s %s)" % [
+             ctype_to_string(ast.decl_var.ctype),
+             ast.decl_var.vname,
+             ast_to_string(ast.decl_init)]
   else
-    printf("(%c ", ast.type)
-    print_ast(ast.left)
-    print(" ")
-    print_ast(ast.right)
-    print(")")
+    buf << "(%c %s %s)" % [ast.type,
+                           ast_to_string(ast.left),
+                           ast_to_string(ast.right)]
   end
+end
+
+def ast_to_string(ast)
+  s = String.new
+  return ast_to_string_int(ast, s);
 end
 
 def emit_data_section
   return if Ast::strings.empty?
   printf("\t.data\n")
   for str in Ast::strings do
-    printf(".s%d:\n\t", str.sid);
-    printf(".string \"");
-    print(str.sval);
-    printf("\"\n");
+    printf(".s%d:\n\t", str.sid)
+    printf(".string \"")
+    print(str.sval)
+    printf("\"\n")
   end
   printf("\t")
 end
@@ -349,7 +416,7 @@ if __FILE__ == $0
   end
   for ast in exprs do
     if wantast
-      print_ast(ast)
+      printf("%s", ast_to_string(ast))
     else
       emit_expr(ast)
     end

@@ -47,6 +47,7 @@ function testfail {
   fi
 }
 
+# Parser
 testast '1' '1;'
 testast '(+ (- (+ 1 2) 3) 4)' '1+2-3+4;'
 testast '(+ (+ 1 (* 2 3)) 4)' '1+2*3+4;'
@@ -55,6 +56,7 @@ testast '(+ (/ 4 2) (/ 6 3))' '4/2+6/3;'
 testast '(/ (/ 24 2) 4)' '24/2/4;'
 testast '(decl int a 3)' 'int a=3;'
 testast "(decl char c 'a')" "char c='a';"
+testast '(decl int a 1)(decl int b 2)(= a (= b 3))' 'int a=1;int b=2;a=b=3;'
 
 testast '"abc"' '"abc";'
 testast "'c'" "'c';"
@@ -62,6 +64,7 @@ testast "'c'" "'c';"
 testast 'a()' 'a();'
 testast 'a(1,2,3,4,5,6)' 'a(1,2,3,4,5,6);'
 
+# Expression
 test 0 '0;'
 
 test 3 '1+2;'
@@ -82,10 +85,7 @@ testfail '0abc;'
 testfail '1+;'
 testfail '1=2;'
 
-test 25 'sum2(20, 5);'
-test 15 'sum5(1, 2, 3, 4, 5);'
-test a3 'printf("a");3;'
-test abc5 'printf("%s", "abc");5;'
-test b1 "printf(\"%c\", 'a'+1);1;"
+# Incompatible type
+testfail '"a"+1;'
 
 echo "All tests passed"
