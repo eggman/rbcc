@@ -11,57 +11,87 @@ module CTYPE
   INT=1
   CHAR=2
   STR=4
+  PTR=5
+
+  Ctype  = Struct.new :type, :ptr
+
+  def make_ptr_type(ctype)
+    Ctype.new PTR, ctype
+  end
+  module_function :make_ptr_type
+
+  @@ctype_int  = Ctype.new INT, nil
+  @@ctype_char = Ctype.new CHAR, nil
+  @@ctype_str  = Ctype.new STR, nil
+
+  def ctype_int
+   @@ctype_int
+  end
+
+  def ctype_char
+   @@ctype_char
+  end
+
+  def ctype_str
+   @@ctype_str
+  end
+  module_function :ctype_int, :ctype_char, :ctype_str
 end
 
 module Ast
-  INT = 0
-  CHAR = 1
-  VAR = 2
-  STR = 3
-  FUNCALL = 4
-  DECL = 5
+  LITERAL = 0
+  VAR = 1
+  FUNCALL = 2
+  DECL = 3
+  ADDR = 4
+  DEREF = 5
 
-  @@vars_pos  = 0
+  @@vars_pos  = 1
   @@vars_list = Array.new
   @@strings_sid = 0
   @@strings_list = Array.new
 
+  Uop     = Struct.new :type, :ctype, :operand
   Op      = Struct.new :type, :ctype, :left, :right
   Int     = Struct.new :type, :ctype, :ival
   Char    = Struct.new :type, :ctype, :c
   Var     = Struct.new :type, :ctype, :vname, :vpos
   Str     = Struct.new :type, :ctype, :sval, :sid
-  Funcall = Struct.new :type, :fname, :args
-  Decl    = Struct.new :type, :decl_var, :decl_init
+  Funcall = Struct.new :type, :ctype, :fname, :args
+  Decl    = Struct.new :type, :ctype, :decl_var, :decl_init
 
-  def make_op(type, ctype, left, right)
+  def make_uop(type, ctype, operand)
+    Uop.new type, ctype, operand
+  end
+
+  def make_binop(type, ctype, left, right)
     Op.new type, ctype, left, right
   end
 
   def make_int(val)
-    Int.new INT, CTYPE::INT, val
+    Int.new LITERAL, CTYPE::ctype_int, val
   end
 
   def make_char(c)
-    Char.new CHAR, CTYPE::CHAR,  c
+    Char.new LITERAL, CTYPE::ctype_char, c
   end
 
   def make_str(str)
-    ast = Str.new STR, CTYPE::STR, str, @@strings_sid
+    ast = Str.new LITERAL, CTYPE::ctype_str, str, @@strings_sid
     @@strings_list << ast
     @@strings_sid += 1
     ast
   end
 
   def make_funcall(fname, args)
-    Funcall.new FUNCALL, fname, args
+    Funcall.new FUNCALL, CTYPE::ctype_int, fname, args
   end
 
   def make_decl(var, init)
-    Decl.new DECL, var, init
+    Decl.new DECL, nil, var, init
   end
 
-  module_function :make_op, :make_int, :make_char, :make_str, :make_funcall, :make_decl
+  module_function :make_uop, :make_binop, :make_int, :make_char, :make_str, :make_funcall, :make_decl
 
   def strings
     @@strings_list
@@ -96,6 +126,10 @@ end
 
 def error(str)
   raise RuntimeError, str
+end
+
+def assert(expr)
+  raise RuntimeError, expr unless expr
 end
 
 def is_right_assoc(op)
@@ -159,35 +193,43 @@ def read_prim
   end
 end
 
-def result_type(op, a, b)
+def result_type_int(a, b)
   swapped = false
-  if a.ctype > b.ctype
-    swapped = true
-    a,b=b,a
-  end
   catch :err do
-    case a.ctype
-    when CTYPE::VOID;
+    if a.type == CTYPE::PTR
+      unless b.type == CTYPE::PTR
+        throw :err
+      end
+      return CTYPE::Ctype.new CTYPE::PTR, result_type_int(a,b)
+    end
+
+    if a.type > b.type
+      swapped = true
+      a,b=b,a
+    end
+
+    case a.type
+    when CTYPE::VOID
       throw :err
-    when CTYPE::INT;
-      case b.ctype
-      when CTYPE::INT;
-        return CTYPE::INT
-      when CTYPE::CHAR;
-        return CTYPE::INT
+    when CTYPE::INT
+      case b.type
+      when CTYPE::INT
+        return CTYPE::ctype_int
+      when CTYPE::CHAR
+        return CTYPE::ctype_int
       when CTYPE::STR;
         throw :err
       end
       error("internal error1")
-    when CTYPE::CHAR;
-      case b.ctype
-      when CTYPE::CHAR;
-        return CTYPE::INT
-      when CTYPE::STR;
+    when CTYPE::CHAR
+      case b.type
+      when CTYPE::CHAR
+        return CTYPE::ctype_int
+      when CTYPE::STR
         catch :err
       end
       error("internal error2")
-    when CTYPE::STR;
+    when CTYPE::STR
       throw :err
     else
       error("internal error3")
@@ -196,11 +238,39 @@ def result_type(op, a, b)
 #err:
   a,b = b,a if (swapped)
   error("incompatible operands: %s and %s for %c"%
-        [ast_to_string(a), ast_to_string(b), op])
+        [ctype_to_string(a), ctype_to_string(b)])
+end
+
+def result_type(op, a, b)
+  return result_type_int(a.ctype, b.ctype)
+end
+
+def ensure_lvalue(ast)
+  if (ast.type != Ast::VAR)
+    error("lvalue expected, but got %s"%ast_to_string(ast))
+  end
+end
+
+def read_unary_expr
+  tok = read_token()
+  if is_punct(tok, '&')
+    operand = read_unary_expr()
+    ensure_lvalue(operand)
+    return Ast::make_uop(Ast::ADDR, CTYPE::make_ptr_type(operand.ctype), operand)
+  end
+  if is_punct(tok, '*')
+    operand = read_unary_expr()
+    if operand.ctype.type != CTYPE::PTR
+      error("pointer type expected, but got %s"%ast_to_string(operand))
+    end
+    return Ast::make_uop(Ast::DEREF, operand.ctype.ptr, operand)
+  end
+  unget_token(tok)
+  return read_prim()
 end
 
 def read_expr(prec)
-  ast = read_prim()
+  ast = read_unary_expr()
   return nil unless ast
   while true
     tok = read_token()
@@ -215,7 +285,7 @@ def read_expr(prec)
     end
     rest  = read_expr(prec2 + (is_right_assoc(tok.punct) ? 0 : 1))
     ctype = result_type(tok.punct, ast, rest)
-    ast   = Ast::make_op(tok.punct, ctype, ast, rest)
+    ast   = Ast::make_binop(tok.punct, ctype, ast, rest)
   end
 end
 
@@ -234,22 +304,22 @@ end
 
 def get_ctype(tok)
   if (tok.type != Token::IDENT)
-    return -1
+    return nil
   end
   if (tok.sval == "int")
-    return CTYPE::INT
+    return CTYPE::ctype_int
   end
   if (tok.sval == "char")
-    return CTYPE::CHAR
+    return CTYPE::ctype_char
   end
   if (tok.sval == "string")
-    return CTYPE::STR
+    return CTYPE::ctype_str
   end
-  return -1
+  return nil
 end
 
 def is_type_keyword(tok)
-  return get_ctype(tok) != -1
+  return get_ctype(tok) != nil
 end
 
 def expect(punct)
@@ -261,9 +331,13 @@ end
 
 def read_decl
   ctype = get_ctype(read_token())
-  name = read_token()
-  error("Identifier expected, but got %s"%token_to_string(name)) if name.type != Token::IDENT
-  var = Ast::make_var(ctype, name.sval)
+  while true
+    tok = read_token()
+    break unless is_punct(tok, '*')
+    ctype = CTYPE::make_ptr_type(ctype)
+  end
+  error("Identifier expected, but got %s"%token_to_string(tok)) if tok.type != Token::IDENT
+  var = Ast::make_var(ctype, tok.sval)
   expect('=')
   init = read_expr(0)
   return Ast::make_decl(var, init)
@@ -280,7 +354,7 @@ end
 
 def emit_assign(var, value)
   emit_expr(value)
-  printf("mov %%eax, -%d(%%rbp)\n\t", var.vpos * 4)
+  printf("mov %%rax, -%d(%%rbp)\n\t", var.vpos * 8)
 end
 
 def emit_binop(ast)
@@ -288,39 +362,40 @@ def emit_binop(ast)
     emit_assign(ast.left, ast.right)
     return
   end
-  if ast.type == Ast::VAR || ast.type == Ast::INT
-    error("invalid operand")
-  elsif ast.type == "+"
-    op = "add"
-  elsif ast.type == "-"
-    op = "sub"
-  elsif ast.type == "*"
-    op = "imul"
+  case ast.type
+  when '+' ; op = "add"
+  when '-' ; op = "sub"
+  when '*' ; op = "imul"
+  when '/' ;
+  else       error("invalid operand")
   end
   emit_expr(ast.left)
   printf("push %%rax\n\t")
   emit_expr(ast.right)
   if ast.type == '/'
-    printf("mov %%eax, %%ebx\n\t")
+    printf("mov %%rax, %%rbx\n\t")
     printf("pop %%rax\n\t")
     printf("mov $0, %%edx\n\t")
-    printf("idiv %%ebx\n\t")
+    printf("idiv %%rbx\n\t")
   else
     printf("pop %%rbx\n\t")
-    printf("%s %%ebx, %%eax\n\t", op)
+    printf("%s %%rbx, %%rax\n\t", op)
   end
 end
 
 def emit_expr(ast)
   case ast.type
-  when Ast::INT
-    printf("mov $%d, %%eax\n\t", ast.ival)
+  when Ast::LITERAL
+    case ast.ctype.type
+    when CTYPE::INT
+      printf("mov $%d, %%rax\n\t", ast.ival)
+    when CTYPE::CHAR
+      printf("mov $%d, %%rax\n\t", ast.c)
+    when CTYPE::STR
+      printf("lea .s%d(%%rip), %%rax\n\t", ast.sid)
+    end
   when Ast::VAR
-    printf("mov -%d(%%rbp), %%eax\n\t", ast.vpos * 4)
-  when Ast::CHAR then
-    printf("mov $%d, %%eax\n\t", ast.c)
-  when Ast::STR
-    printf("lea .s%d(%%rip), %%rax\n\t", ast.sid)
+    printf("mov -%d(%%rbp), %%rax\n\t", ast.vpos * 8)
   when Ast::FUNCALL
     for i in 1..(ast.args.length-1) do
       printf("push %%%s\n\t", REGS[i])
@@ -332,38 +407,49 @@ def emit_expr(ast)
     for arg in ast.args.reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
     end
-    printf("mov $0, %%eax\n\t")
+    printf("mov $0, %%rax\n\t")
     printf("call %s\n\t", ast.fname)
     for arg in ast.args[0..-2].reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
     end
   when Ast::DECL
     emit_assign(ast.decl_var, ast.decl_init)
+  when Ast::ADDR
+    assert(ast.operand.type == Ast::VAR)
+    printf("lea -%d(%%rbp), %%rax\n\t", ast.operand.vpos * 8)
+  when Ast::DEREF
+    assert(ast.operand.ctype.type == CTYPE::PTR)
+    emit_expr(ast.operand)
+    printf("mov (%%rax), %%rax\n\t")
   else
     emit_binop(ast)
   end
 end
 
 def ctype_to_string(ctype)
-  case (ctype)
+  case (ctype.type)
   when CTYPE::VOID; return "void"
   when CTYPE::INT ; return "int"
   when CTYPE::CHAR; return "char"
   when CTYPE::STR ; return "string"
-  else error("Unknown ctype: %d", ctype)
+  when CTYPE::PTR ; return "%s*"%ctype_to_string(ctype.ptr)
+  else error("Unknown ctype: %d", ctype.type)
   end
 end
 
 def ast_to_string_int(ast, buf)
   case ast.type
-  when Ast::INT
-    buf << ast.ival.to_s
+  when Ast::LITERAL
+    case ast.ctype.type
+    when CTYPE::INT
+      buf << ast.ival.to_s
+    when CTYPE::CHAR
+      buf << "'%c'" % ast.c
+    when CTYPE::STR
+      buf << "\"%s\""%ast.sval
+    end
   when Ast::VAR
     buf << ast.vname
-  when Ast::CHAR
-    buf << "'%c'" % ast.c
-  when Ast::STR
-    buf << "\"" + ast.sval + "\""
   when Ast::FUNCALL
     buf << "%s(" % ast.fname
     for arg in ast.args do
@@ -376,6 +462,10 @@ def ast_to_string_int(ast, buf)
              ctype_to_string(ast.decl_var.ctype),
              ast.decl_var.vname,
              ast_to_string(ast.decl_init)]
+  when Ast::ADDR
+    buf << "(& %s)"%ast_to_string(ast.operand)
+  when Ast::DEREF
+    buf << "(* %s)"%ast_to_string(ast.operand)
   else
     buf << "(%c %s %s)" % [ast.type,
                            ast_to_string(ast.left),
@@ -412,7 +502,13 @@ if __FILE__ == $0
     emit_data_section()
     printf(".text\n\t" +
            ".global mymain\n" +
-           "mymain:\n\t")
+           "mymain:\n\t" +
+           "push %%rbp\n\t" +
+           "mov %%rsp, %%rbp\n\t")
+    unless Ast::vars.empty?
+      var = Ast::vars[-1]
+      printf("sub $%d, %%rsp\n\t", var.vpos * 8)
+    end
   end
   for ast in exprs do
     if wantast
@@ -422,6 +518,7 @@ if __FILE__ == $0
     end
   end
   if !wantast
-    printf("ret\n")
+    printf("leave\n\t" +
+           "ret\n")
   end
 end
