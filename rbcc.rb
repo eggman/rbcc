@@ -10,7 +10,7 @@ module CTYPE
   VOID=0
   INT=1
   CHAR=2
-  STR=4
+  ARRAY=4
   PTR=5
 
   Ctype  = Struct.new :type, :ptr
@@ -22,20 +22,20 @@ module CTYPE
 
   @@ctype_int  = Ctype.new INT, nil
   @@ctype_char = Ctype.new CHAR, nil
-  @@ctype_str  = Ctype.new STR, nil
+  @@ctype_array  = Ctype.new ARRAY, nil
 
   def ctype_int
-   @@ctype_int
+    @@ctype_int
   end
 
   def ctype_char
-   @@ctype_char
+    @@ctype_char
   end
 
-  def ctype_str
-   @@ctype_str
+  def ctype_array
+    @@ctype_array
   end
-  module_function :ctype_int, :ctype_char, :ctype_str
+  module_function :ctype_int, :ctype_char, :ctype_array
 end
 
 module Ast
@@ -77,7 +77,7 @@ module Ast
   end
 
   def make_str(str)
-    ast = Str.new LITERAL, CTYPE::ctype_str, str, @@strings_sid
+    ast = Str.new LITERAL, CTYPE::ctype_array, str, @@strings_sid
     @@strings_list << ast
     @@strings_sid += 1
     ast
@@ -125,6 +125,10 @@ module Ast
 end
 
 def error(str)
+  raise RuntimeError, str
+end
+
+def warn(str)
   raise RuntimeError, str
 end
 
@@ -193,44 +197,34 @@ def read_prim
   end
 end
 
-def result_type_int(a, b)
+def result_type_int(op, a, b)
   swapped = false
   catch :err do
-    if a.type == CTYPE::PTR
-      unless b.type == CTYPE::PTR
-        throw :err
-      end
-      return CTYPE::Ctype.new CTYPE::PTR, result_type_int(a,b)
-    end
-
     if a.type > b.type
       swapped = true
       a,b=b,a
+    end
+
+    if b.type == CTYPE::PTR
+      if op != '+' && op != '-'
+        throw :err
+      end
+      unless a.type == CTYPE::PTR
+        warn("Making a pointer from %s", ctype_to_string(a))
+        return b
+      end
+      return CTYPE::Ctype.new CTYPE::PTR, result_type_int(op, a,b)
     end
 
     case a.type
     when CTYPE::VOID
       throw :err
     when CTYPE::INT
-      case b.type
-      when CTYPE::INT
-        return CTYPE::ctype_int
-      when CTYPE::CHAR
-        return CTYPE::ctype_int
-      when CTYPE::STR;
-        throw :err
-      end
-      error("internal error1")
+      return CTYPE::ctype_int
     when CTYPE::CHAR
-      case b.type
-      when CTYPE::CHAR
-        return CTYPE::ctype_int
-      when CTYPE::STR
-        catch :err
-      end
-      error("internal error2")
-    when CTYPE::STR
-      throw :err
+      return CTYPE::ctype_int
+    when CTYPE::ARRAY
+      return result_type_int(op, Ast::make_ptr_type(a.ptr), b)
     else
       error("internal error3")
     end
@@ -238,11 +232,11 @@ def result_type_int(a, b)
 #err:
   a,b = b,a if (swapped)
   error("incompatible operands: %s and %s for %c"%
-        [ctype_to_string(a), ctype_to_string(b)])
+        [ctype_to_string(a), ctype_to_string(b)], op)
 end
 
 def result_type(op, a, b)
-  return result_type_int(a.ctype, b.ctype)
+  return result_type_int(op, a.ctype, b.ctype)
 end
 
 def ensure_lvalue(ast)
@@ -285,6 +279,9 @@ def read_expr(prec)
     end
     rest  = read_expr(prec2 + (is_right_assoc(tok.punct) ? 0 : 1))
     ctype = result_type(tok.punct, ast, rest)
+    if ctype.type == CTYPE::PTR && ast.ctype.type != CTYPE::PTR
+      ast, rest = rest, ast
+    end
     ast   = Ast::make_binop(tok.punct, ctype, ast, rest)
   end
 end
@@ -311,9 +308,6 @@ def get_ctype(tok)
   end
   if (tok.sval == "char")
     return CTYPE::ctype_char
-  end
-  if (tok.sval == "string")
-    return CTYPE::ctype_str
   end
   return nil
 end
@@ -357,6 +351,32 @@ def emit_assign(var, value)
   printf("mov %%rax, -%d(%%rbp)\n\t", var.vpos * 8)
 end
 
+def ctype_shift(ctype)
+  case ctype.type
+  when CTYPE::CHAR; return 0
+  when CTYPE::INT ; return 2
+  else              return 3
+  end
+end
+
+def ctype_size(ctype)
+  return 1 << ctype_shift(ctype)
+end
+
+def emit_pointer_arith(op, left, right)
+  assert(left.ctype.type == CTYPE::PTR)
+  emit_expr(left)
+  printf("push %%rax\n\t")
+  emit_expr(right)
+  shift = ctype_shift(left.ctype)
+  if shift > 0
+    printf("sal $%d, %%rax\n\t", shift)
+  end
+  printf("mov %%rax, %%rbx\n\t" +
+         "pop %%rax\n\t" +
+         "add %%rbx, %%rax\n\t")
+end
+
 def emit_binop(ast)
   if ast.type == '='
     emit_assign(ast.left, ast.right)
@@ -388,14 +408,25 @@ def emit_expr(ast)
   when Ast::LITERAL
     case ast.ctype.type
     when CTYPE::INT
-      printf("mov $%d, %%rax\n\t", ast.ival)
+      printf("mov $%d, %%eax\n\t", ast.ival)
     when CTYPE::CHAR
       printf("mov $%d, %%rax\n\t", ast.c)
-    when CTYPE::STR
+    when CTYPE::ARRAY
       printf("lea .s%d(%%rip), %%rax\n\t", ast.sid)
     end
   when Ast::VAR
     printf("mov -%d(%%rbp), %%rax\n\t", ast.vpos * 8)
+    case ctype_size(ast.ctype)
+    when 1
+      printf("mov $0, %%eax\n\t")
+      printf("mov -%d(%%rbp), %%al\n\t", ast.vpos * 8)
+    when 4
+      printf("mov -%d(%%rbp), %%eax\n\t", ast.vpos * 8)
+    when 8
+      printf("mov -%d(%%rbp), %%rax\n\t", ast.vpos * 8)
+    else
+      error("internal error")
+    end
   when Ast::FUNCALL
     for i in 1..(ast.args.length-1) do
       printf("push %%%s\n\t", REGS[i])
@@ -407,7 +438,7 @@ def emit_expr(ast)
     for arg in ast.args.reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
     end
-    printf("mov $0, %%rax\n\t")
+    printf("mov $0, %%eax\n\t")
     printf("call %s\n\t", ast.fname)
     for arg in ast.args[0..-2].reverse do
       printf("pop %%%s\n\t", REGS[ast.args.index(arg)])
@@ -420,7 +451,15 @@ def emit_expr(ast)
   when Ast::DEREF
     assert(ast.operand.ctype.type == CTYPE::PTR)
     emit_expr(ast.operand)
-    printf("mov (%%rax), %%rax\n\t")
+    case ctype_size(ast.ctype)
+    when 1; reg = "%bl"
+    when 4; reg = "%ebx"
+    when 8; reg = "%rbx"
+    else    error("internal error")
+    end
+    printf("mov $0, %%ebx\n\t")
+    printf("mov (%%rax), %s\n\t", reg)
+    printf("mov %%rbx, %%rax\n\t")
   else
     emit_binop(ast)
   end
@@ -431,9 +470,9 @@ def ctype_to_string(ctype)
   when CTYPE::VOID; return "void"
   when CTYPE::INT ; return "int"
   when CTYPE::CHAR; return "char"
-  when CTYPE::STR ; return "string"
   when CTYPE::PTR ; return "%s*"%ctype_to_string(ctype.ptr)
-  else error("Unknown ctype: %d", ctype.type)
+  when CTYPE::ARRAY; return "%s[]"%ctype_to_string(ctype.ptr)
+else error("Unknown ctype: %d", ctype.type)
   end
 end
 
@@ -445,7 +484,7 @@ def ast_to_string_int(ast, buf)
       buf << ast.ival.to_s
     when CTYPE::CHAR
       buf << "'%c'" % ast.c
-    when CTYPE::STR
+    when CTYPE::ARRAY
       buf << "\"%s\""%ast.sval
     end
   when Ast::VAR
