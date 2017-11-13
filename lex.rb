@@ -106,7 +106,7 @@ def read_token_init
        'C','D','E','F','G','H','I','J','K','L','M','M','N','O',
        'P','Q','R','S','T','U','V','W','X','Y','Z','_'
     return read_ident(c)
-  when '/','=','*','+','-','(',')',',',';','&'
+  when '/','=','*','+','-','(',')',',',';','&','[',']','{','}'
     return Token::make_punct(c)
   when nil
     return nil
